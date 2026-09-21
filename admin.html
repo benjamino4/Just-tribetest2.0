@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Elders' Forge · Control Panel</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="forge-body">
+  <div id="gate" class="forge-gate">
+    <div class="gate-card">
+      <div class="gate-flame">▲</div>
+      <h1>Elders' Forge</h1>
+      <p class="muted">Owner control panel. Enter the forge key to unseal.</p>
+      <input id="keyInput" type="password" placeholder="Forge key" autocomplete="off" />
+      <button id="unlockBtn" class="btn primary block">Unseal the Forge</button>
+      <p id="gateMsg" class="gate-msg"></p>
+    </div>
+  </div>
+
+  <div id="panel" class="forge-panel hidden">
+    <header class="forge-head">
+      <div><b>Elders' Forge</b><span id="authTag" class="pill"></span></div>
+      <div class="forge-actions">
+        <button id="refreshBtn" class="btn ghost sm">Refresh</button>
+        <button id="lockBtn" class="btn ghost sm">Lock</button>
+      </div>
+    </header>
+
+    <nav class="forge-tabs">
+      <button class="ftab on" data-t="world">World</button>
+      <button class="ftab" data-t="economy">Economy</button>
+      <button class="ftab" data-t="tasks">Quests</button>
+      <button class="ftab" data-t="store">Store</button>
+      <button class="ftab" data-t="tribes">Tribes &amp; Kin</button>
+      <button class="ftab" data-t="raw">Raw Config</button>
+    </nav>
+
+    <main class="forge-main">
+      <section class="fview on" id="v-world"></section>
+      <section class="fview" id="v-economy"></section>
+      <section class="fview" id="v-tasks"></section>
+      <section class="fview" id="v-store"></section>
+      <section class="fview" id="v-tribes"></section>
+      <section class="fview" id="v-raw"></section>
+    </main>
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script src="/forge.js"></script>
+</body>
+</html>
