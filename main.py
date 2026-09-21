@@ -234,6 +234,36 @@ def init_db() -> None:
             PRIMARY KEY (owner, owner_type, item_id))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS payments (
             charge_id TEXT PRIMARY KEY, user_id TEXT, item_id TEXT, stars INTEGER, ts TEXT)""")
+        # Auto-migrate: older DBs may miss v2 columns. Postgres supports
+        # ADD COLUMN IF NOT EXISTS, so these are safe to run on every boot.
+        if USE_PG:
+            for stmt in (
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS username    TEXT    DEFAULT ''",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS tribe_id    TEXT",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS kindle      INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS ember       INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS last_checkin TEXT   DEFAULT ''",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS referrer_id TEXT    DEFAULT ''",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS cosmetics   TEXT    DEFAULT '{}'",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS title       TEXT    DEFAULT ''",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS wallet      TEXT    DEFAULT ''",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS wards       INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE users  ADD COLUMN IF NOT EXISTS created_at  TEXT",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS chief_id    TEXT",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS crest       TEXT    DEFAULT 'flame'",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS color       TEXT    DEFAULT '#ff5a3c'",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS level       INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS loyalty     INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS loyalty_earned INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS embertide   INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS war_cry     TEXT    DEFAULT ''",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS chill_days  INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS created_at  TEXT",
+            ):
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
 
 # --------------------------------------------------------------------------- #
 # Telegram auth (HMAC-verified initData)                                      #
