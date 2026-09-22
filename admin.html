@@ -6,6 +6,25 @@
 <meta name="robots" content="noindex, nofollow" />
 <title>Elders' Forge · Control Panel</title>
 <link rel="stylesheet" href="/styles.css" />
+<style>
+  /* Forge v3 additive styling (falls back gracefully if styles.css lacks these) */
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:6px 0 4px}
+  .stat{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 14px}
+  .stat .n{font-size:24px;font-weight:700;line-height:1.1}
+  .stat .l{font-size:11px;letter-spacing:.06em;text-transform:uppercase;opacity:.65;margin-top:4px}
+  .bars{display:flex;gap:3px;align-items:flex-end;height:52px;margin-top:8px}
+  .bars .bar{flex:1;background:#ff5a3c;border-radius:3px 3px 0 0;min-height:2px;opacity:.85}
+  .ftable{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  .ftable th,.ftable td{text-align:left;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .ftable th{opacity:.6;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  .tag{display:inline-block;font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(255,255,255,.1);margin-left:4px}
+  .tag.bad{background:#c0392b}.tag.warn{background:#c07a1a}.tag.ok{background:#1f8a5b}
+  .row-wrap{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .searchbar{display:flex;gap:8px;margin-bottom:10px}
+  .searchbar input{flex:1}
+  textarea.raw-json,textarea.bcast{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .muted-sm{font-size:11px;opacity:.6}
+</style>
 </head>
 <body class="forge-body">
   <div id="gate" class="forge-gate">
@@ -21,7 +40,7 @@
 
   <div id="panel" class="forge-panel hidden">
     <header class="forge-head">
-      <div><b>Elders' Forge</b><span id="authTag" class="pill"></span></div>
+      <div><b>Elders' Forge</b><span id="authTag" class="pill"></span><span id="maintTag"></span></div>
       <div class="forge-actions">
         <button id="refreshBtn" class="btn ghost sm">Refresh</button>
         <button id="lockBtn" class="btn ghost sm">Lock</button>
@@ -29,20 +48,32 @@
     </header>
 
     <nav class="forge-tabs">
-      <button class="ftab on" data-t="world">World</button>
+      <button class="ftab on" data-t="dash">Dashboard</button>
+      <button class="ftab" data-t="world">World</button>
       <button class="ftab" data-t="economy">Economy</button>
       <button class="ftab" data-t="tasks">Quests</button>
       <button class="ftab" data-t="store">Store</button>
+      <button class="ftab" data-t="lands">Lands</button>
       <button class="ftab" data-t="tribes">Tribes &amp; Kin</button>
+      <button class="ftab" data-t="broadcast">Broadcast</button>
+      <button class="ftab" data-t="airdrop">Airdrop</button>
+      <button class="ftab" data-t="system">System</button>
+      <button class="ftab" data-t="audit">Audit</button>
       <button class="ftab" data-t="raw">Raw Config</button>
     </nav>
 
     <main class="forge-main">
-      <section class="fview on" id="v-world"></section>
+      <section class="fview on" id="v-dash"></section>
+      <section class="fview" id="v-world"></section>
       <section class="fview" id="v-economy"></section>
       <section class="fview" id="v-tasks"></section>
       <section class="fview" id="v-store"></section>
+      <section class="fview" id="v-lands"></section>
       <section class="fview" id="v-tribes"></section>
+      <section class="fview" id="v-broadcast"></section>
+      <section class="fview" id="v-airdrop"></section>
+      <section class="fview" id="v-system"></section>
+      <section class="fview" id="v-audit"></section>
       <section class="fview" id="v-raw"></section>
     </main>
     <div id="toast" class="toast"></div>

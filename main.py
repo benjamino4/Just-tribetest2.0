@@ -12,19 +12,22 @@ Store is cosmetic/convenience/social ONLY - never Loyalty, Kindle, rank, land
 or allocation - to keep the airdrop fair.
 """
 import asyncio
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 _HERE = Path(__file__).resolve().parent
 BASE_DIR = _HERE
@@ -171,7 +174,7 @@ def age_now() -> dict:
 # --------------------------------------------------------------------------- #
 _ALL_TABLES = (
     "settings", "tribes", "users", "checkins", "completions", "relics",
-    "lands", "rekindles", "referrals", "inventory", "payments",
+    "lands", "rekindles", "referrals", "inventory", "payments", "audit_log",
 )
 
 
@@ -213,6 +216,9 @@ def init_db() -> None:
             title TEXT DEFAULT '',
             wallet TEXT DEFAULT '',
             wards INTEGER NOT NULL DEFAULT 0,
+            banned INTEGER NOT NULL DEFAULT 0,
+            flagged INTEGER NOT NULL DEFAULT 0,
+            notes TEXT DEFAULT '',
             created_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS checkins (
             user_id TEXT NOT NULL, day TEXT NOT NULL,
@@ -248,6 +254,21 @@ def init_db() -> None:
             PRIMARY KEY (owner, owner_type, item_id))""")
         conn.execute("""CREATE TABLE IF NOT EXISTS payments (
             charge_id TEXT PRIMARY KEY, user_id TEXT, item_id TEXT, stars INTEGER, ts TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT, actor TEXT, action TEXT, detail TEXT)""") if not USE_PG else conn.execute(
+            """CREATE TABLE IF NOT EXISTS audit_log (
+            id SERIAL PRIMARY KEY, ts TEXT, actor TEXT, action TEXT, detail TEXT)""")
+        # v3 additive columns (safe to re-run on both engines).
+        for _stmt in (
+            "ALTER TABLE users ADD COLUMN banned  INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN notes   TEXT DEFAULT ''",
+        ):
+            try:
+                conn.execute(_stmt)
+            except Exception:
+                pass
         # Auto-migrate: older DBs may miss v2 columns. Postgres supports
         # ADD COLUMN IF NOT EXISTS, so these are safe to run on every boot.
         if USE_PG:
@@ -935,7 +956,17 @@ seed_demo()
 # --------------------------------------------------------------------------- #
 async def _who(request: Request):
     u = await get_user(request)
-    return str(u["id"]), u.get("first_name", "Kin"), (u.get("username") or ""), u
+    uid = str(u["id"])
+    try:
+        with db() as conn:
+            r = conn.execute("SELECT banned FROM users WHERE user_id = ?", (uid,)).fetchone()
+        if r and int(_row(r).get("banned", 0)):
+            raise HTTPException(status_code=403, detail="You have been banished from the tribes.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return uid, u.get("first_name", "Kin"), (u.get("username") or ""), u
 
 
 @app.get("/api/state")
@@ -1453,6 +1484,7 @@ async def admin_patch_config(request: Request):
         raise HTTPException(status_code=400, detail="patch must be an object")
     over = get_setting("config_override", {})
     set_setting("config_override", _deep_merge(over, patch))
+    log_audit(_actor_of(user), "config:patch", ",".join(list(patch.keys()))[:200])
     return JSONResponse({"ok": True, "config": cfg()})
 
 
@@ -1460,6 +1492,7 @@ async def admin_patch_config(request: Request):
 async def admin_reset_config(request: Request):
     user = await require_admin_request(request)
     set_setting("config_override", {})
+    log_audit(_actor_of(user), "config:reset", "all overrides cleared")
     return JSONResponse({"ok": True, "config": cfg()})
 
 
@@ -1472,6 +1505,7 @@ async def admin_set_age(request: Request):
         raise HTTPException(status_code=400, detail="unknown age")
     over = get_setting("config_override", {})
     set_setting("config_override", _deep_merge(over, {"age": {"current": age_id}}))
+    log_audit(_actor_of(user), "world:set_age", age_id)
     return JSONResponse({"ok": True, "age": age_now()})
 
 
@@ -1540,6 +1574,7 @@ async def admin_grant(request: Request):
             if "ember" in body:
                 conn.execute("UPDATE users SET ember = ember + ? WHERE user_id = ?",
                              (int(body["ember"]), body["user_id"]))
+    log_audit(_actor_of(user), "grant", json.dumps({k: body.get(k) for k in ("tribe_id", "user_id", "loyalty", "embertide", "kindle", "ember") if k in body})[:200])
     return JSONResponse({"ok": True})
 
 
@@ -1580,8 +1615,8 @@ async def admin_overview(request: Request):
 
 @app.post("/api/admin/tribe")
 async def admin_tribe(request: Request):
-    """Owner control over a tribe: rename, recolor, set crest/level, or disband."""
-    await require_admin_request(request)
+    """Owner control over a tribe: rename, recolor, set crest/level/chief, or disband."""
+    user = await require_admin_request(request)
     body = await body_of(request)
     tid = str(body.get("tribe_id", ""))
     if not tid:
@@ -1592,13 +1627,534 @@ async def admin_tribe(request: Request):
         if body.get("op") == "disband":
             conn.execute("UPDATE users SET tribe_id = NULL WHERE tribe_id = ?", (tid,))
             conn.execute("DELETE FROM tribes WHERE tribe_id = ?", (tid,))
+            log_audit(_actor_of(user), "tribe:disband", tid)
             return JSONResponse({"ok": True, "disbanded": tid})
         for col in ("name", "crest", "color"):
             if col in body and body[col] is not None:
                 conn.execute(f"UPDATE tribes SET {col} = ? WHERE tribe_id = ?", (str(body[col])[:32], tid))
         if "level" in body:
             conn.execute("UPDATE tribes SET level = ? WHERE tribe_id = ?", (int(body["level"]), tid))
+        if body.get("chief_id"):
+            cid = str(body["chief_id"])
+            if not conn.execute("SELECT 1 FROM users WHERE user_id = ? AND tribe_id = ?", (cid, tid)).fetchone():
+                raise HTTPException(status_code=400, detail="chief must be a member of the tribe")
+            conn.execute("UPDATE tribes SET chief_id = ? WHERE tribe_id = ?", (cid, tid))
+    log_audit(_actor_of(user), "tribe:update", tid)
     return JSONResponse({"ok": True})
+
+# --------------------------------------------------------------------------- #
+# Elders' Forge v3 - audit, dashboard, moderation, broadcast, lands, airdrop  #
+# --------------------------------------------------------------------------- #
+def _actor_of(user: dict) -> str:
+    return str((user or {}).get("username") or (user or {}).get("id") or "owner")
+
+
+def log_audit(actor: str, action: str, detail: str = "") -> None:
+    try:
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO audit_log (ts, actor, action, detail) VALUES (?, ?, ?, ?)",
+                (iso(_now()), str(actor)[:64], str(action)[:64], str(detail)[:500]))
+    except Exception:
+        pass
+
+
+def _maint() -> dict:
+    m = get_setting("maintenance", {})
+    return m if isinstance(m, dict) else {}
+
+
+@app.middleware("http")
+async def _maintenance_gate(request: Request, call_next):
+    p = request.url.path
+    if p.startswith("/api/") and not (
+        p.startswith("/api/admin") or p.startswith("/api/telegram")
+    ):
+        m = _maint()
+        if m.get("on"):
+            return JSONResponse(
+                {"detail": m.get("message", "The forge is being retuned. Back soon."),
+                 "maintenance": True}, status_code=503)
+    return await call_next(request)
+
+@app.get("/api/admin/dashboard")
+async def admin_dashboard(request: Request):
+    """Aggregate health metrics for the operator's at-a-glance panel."""
+    await require_admin_request(request)
+    today = today_iso()
+    d7 = (_now().date() - timedelta(days=7)).isoformat()
+    with db() as conn:
+        total_users = _row(conn.execute("SELECT COUNT(*) AS c FROM users").fetchone())["c"]
+        dau = _row(conn.execute("SELECT COUNT(*) AS c FROM checkins WHERE day = ?", (today,)).fetchone())["c"]
+        wau = _row(conn.execute("SELECT COUNT(DISTINCT user_id) AS c FROM checkins WHERE day >= ?", (d7,)).fetchone())["c"]
+        new_today = _row(conn.execute("SELECT COUNT(*) AS c FROM users WHERE created_at >= ?", (today,)).fetchone())["c"]
+        banned = _row(conn.execute("SELECT COUNT(*) AS c FROM users WHERE banned = 1").fetchone())["c"]
+        flagged = _row(conn.execute("SELECT COUNT(*) AS c FROM users WHERE flagged = 1").fetchone())["c"]
+        total_ember = _row(conn.execute("SELECT COALESCE(SUM(ember),0) AS s FROM users").fetchone())["s"]
+        wallets = _row(conn.execute("SELECT COUNT(*) AS c FROM users WHERE wallet <> '' AND wallet IS NOT NULL").fetchone())["c"]
+        tribe_count = _row(conn.execute("SELECT COUNT(*) AS c FROM tribes").fetchone())["c"]
+        total_loyalty = _row(conn.execute("SELECT COALESCE(SUM(loyalty),0) AS s FROM tribes").fetchone())["s"]
+        stars = _row(conn.execute("SELECT COALESCE(SUM(stars),0) AS s, COUNT(*) AS c FROM payments").fetchone())
+        lands_held = _row(conn.execute("SELECT COUNT(*) AS c FROM lands WHERE owner_tribe <> '' AND owner_tribe IS NOT NULL").fetchone())["c"]
+        states = _rows(conn.execute("SELECT last_checkin FROM users").fetchall())
+        signup = _rows(conn.execute("SELECT created_at FROM users").fetchall())
+    active = cooling = fading = 0
+    for s in states:
+        st = activity_state(s.get("last_checkin", ""))
+        if st == "active":
+            active += 1
+        elif st == "cooling":
+            cooling += 1
+        else:
+            fading += 1
+    series = []
+    for i in range(13, -1, -1):
+        day = (_now().date() - timedelta(days=i)).isoformat()
+        n = sum(1 for r in signup if (r.get("created_at") or "")[:10] == day)
+        series.append({"day": day, "signups": n})
+    return JSONResponse({
+        "total_users": total_users, "dau": dau, "wau": wau, "new_today": new_today,
+        "banned": banned, "flagged": flagged, "wallets_bound": wallets,
+        "active": active, "cooling": cooling, "fading": fading,
+        "tribe_count": tribe_count, "lands_held": lands_held,
+        "total_ember": total_ember, "total_loyalty": total_loyalty,
+        "stars_revenue": stars["s"], "purchases": stars["c"],
+        "signups_14d": series, "maintenance": _maint().get("on", False),
+        "age": age_now().get("name"), "dev_mode": DEV_MODE,
+    })
+
+
+@app.get("/api/admin/users")
+async def admin_users(request: Request):
+    """Searchable, paginated kin roster."""
+    await require_admin_request(request)
+    q = (request.query_params.get("q") or "").strip().lower()
+    try:
+        offset = max(0, int(request.query_params.get("offset", "0") or 0))
+        limit = min(100, max(1, int(request.query_params.get("limit", "50") or 50)))
+    except ValueError:
+        offset, limit = 0, 50
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT user_id, name, username, tribe_id, kindle, ember, wards, wallet, "
+            "last_checkin, banned, flagged, title FROM users ORDER BY kindle DESC").fetchall())
+    if q:
+        rows = [r for r in rows if q in str(r["user_id"]).lower()
+                or q in (r.get("name") or "").lower()
+                or q in (r.get("username") or "").lower()
+                or q in (r.get("wallet") or "").lower()]
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    for u in page:
+        u["state"] = activity_state(u.get("last_checkin", ""))
+    return JSONResponse({"users": page, "total": total, "offset": offset, "limit": limit})
+
+
+@app.post("/api/admin/user")
+async def admin_user(request: Request):
+    """Moderate a single kin: ban/unban, flag, reset, delete, move, set title."""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    uid = str(body.get("user_id", ""))
+    op = body.get("op")
+    if not uid:
+        raise HTTPException(status_code=400, detail="user_id required")
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE user_id = ?", (uid,)).fetchone():
+            raise HTTPException(status_code=404, detail="user not found")
+        if op == "ban":
+            conn.execute("UPDATE users SET banned = 1 WHERE user_id = ?", (uid,))
+        elif op == "unban":
+            conn.execute("UPDATE users SET banned = 0 WHERE user_id = ?", (uid,))
+        elif op == "flag":
+            conn.execute("UPDATE users SET flagged = 1 WHERE user_id = ?", (uid,))
+        elif op == "unflag":
+            conn.execute("UPDATE users SET flagged = 0 WHERE user_id = ?", (uid,))
+        elif op == "reset":
+            conn.execute("UPDATE users SET kindle = 0, ember = 0, wards = 0, last_checkin = '', title = '' WHERE user_id = ?", (uid,))
+            conn.execute("DELETE FROM checkins WHERE user_id = ?", (uid,))
+            conn.execute("DELETE FROM completions WHERE user_id = ?", (uid,))
+            conn.execute("DELETE FROM relics WHERE user_id = ?", (uid,))
+        elif op == "delete":
+            for tbl in ("checkins", "completions", "relics"):
+                conn.execute(f"DELETE FROM {tbl} WHERE user_id = ?", (uid,))
+            conn.execute("DELETE FROM users WHERE user_id = ?", (uid,))
+        elif op == "set_tribe":
+            tid = body.get("tribe_id") or None
+            if tid and not conn.execute("SELECT 1 FROM tribes WHERE tribe_id = ?", (tid,)).fetchone():
+                raise HTTPException(status_code=404, detail="tribe not found")
+            conn.execute("UPDATE users SET tribe_id = ? WHERE user_id = ?", (tid, uid))
+        elif op == "set_title":
+            conn.execute("UPDATE users SET title = ? WHERE user_id = ?", (str(body.get("title", ""))[:40], uid))
+        else:
+            raise HTTPException(status_code=400, detail="bad op")
+    log_audit(_actor_of(user), "user:" + str(op), uid)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/tribe_roster")
+async def admin_tribe_roster(request: Request):
+    await require_admin_request(request)
+    tid = request.query_params.get("tribe_id", "")
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT user_id, name, username, kindle, ember, last_checkin FROM users "
+            "WHERE tribe_id = ? ORDER BY kindle DESC", (tid,)).fetchall())
+        chief = _row(conn.execute("SELECT chief_id FROM tribes WHERE tribe_id = ?", (tid,)).fetchone()) or {}
+    for u in rows:
+        u["state"] = activity_state(u.get("last_checkin", ""))
+    return JSONResponse({"roster": rows, "chief_id": chief.get("chief_id")})
+
+
+@app.get("/api/admin/wallets")
+async def admin_wallets(request: Request):
+    """Wallet inspector - surfaces addresses bound to multiple accounts (sybil signal)."""
+    await require_admin_request(request)
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT user_id, name, username, wallet FROM users "
+            "WHERE wallet <> '' AND wallet IS NOT NULL").fetchall())
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["wallet"], []).append(r)
+    dupes = [{"wallet": w, "users": us} for w, us in groups.items() if len(us) > 1]
+    dupes.sort(key=lambda d: -len(d["users"]))
+    return JSONResponse({"total_bound": len(rows), "unique": len(groups), "duplicates": dupes})
+
+def _tg_send(chat_id: str, text: str) -> dict:
+    """sendMessage with graceful 429 handling; returns Telegram's JSON or an error dict."""
+    try:
+        return _tg_call("sendMessage", {"chat_id": chat_id, "text": text[:4000],
+                                        "parse_mode": "HTML", "disable_web_page_preview": True})
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            data = {}
+        return data or {"ok": False, "error_code": e.code}
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
+def _run_broadcast(recipients: list, text: str) -> dict:
+    sent = failed = 0
+    for chat_id in recipients:
+        r = _tg_send(chat_id, text)
+        if r.get("ok"):
+            sent += 1
+        elif r.get("error_code") == 429:
+            wait = int((r.get("parameters") or {}).get("retry_after", 1)) + 1
+            time.sleep(min(wait, 30))
+            r2 = _tg_send(chat_id, text)
+            sent += 1 if r2.get("ok") else 0
+            failed += 0 if r2.get("ok") else 1
+        else:
+            failed += 1
+        time.sleep(0.05)  # ~20 msgs/sec, under Telegram's ~30/s ceiling
+    return {"sent": sent, "failed": failed, "total": len(recipients)}
+
+
+@app.post("/api/admin/broadcast")
+async def admin_broadcast(request: Request):
+    """Push a Telegram message to all / a tribe / an activity segment."""
+    user = await require_admin_request(request)
+    if DEV_MODE:
+        raise HTTPException(status_code=400, detail="no BOT_TOKEN: cannot broadcast")
+    body = await body_of(request)
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    target = str(body.get("target", "all"))  # all | tribe:<id> | state:<active|cooling|fading>
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT user_id, tribe_id, last_checkin FROM users WHERE banned = 0").fetchall())
+    if target.startswith("tribe:"):
+        tid = target.split(":", 1)[1]
+        rows = [r for r in rows if r.get("tribe_id") == tid]
+    elif target.startswith("state:"):
+        want = target.split(":", 1)[1]
+        rows = [r for r in rows if activity_state(r.get("last_checkin", "")) == want]
+    recipients = [str(r["user_id"]) for r in rows if str(r["user_id"]).lstrip("-").isdigit()]
+    if body.get("dry_run"):
+        return JSONResponse({"ok": True, "would_send": len(recipients), "target": target})
+    result = await asyncio.to_thread(_run_broadcast, recipients, text)
+    log_audit(_actor_of(user), "broadcast", f"target={target} sent={result['sent']} failed={result['failed']}")
+    return JSONResponse({"ok": True, **result, "target": target})
+
+
+@app.get("/api/admin/audit")
+async def admin_audit(request: Request):
+    await require_admin_request(request)
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT ts, actor, action, detail FROM audit_log ORDER BY id DESC LIMIT 200").fetchall())
+    return JSONResponse({"audit": rows})
+
+
+@app.get("/api/admin/payments")
+async def admin_payments(request: Request):
+    await require_admin_request(request)
+    with db() as conn:
+        rows = _rows(conn.execute(
+            "SELECT charge_id, user_id, item_id, stars, ts FROM payments ORDER BY ts DESC LIMIT 200").fetchall())
+        tot = _row(conn.execute("SELECT COALESCE(SUM(stars),0) AS s, COUNT(*) AS c FROM payments").fetchone())
+    return JSONResponse({"payments": rows, "total_stars": tot["s"], "count": tot["c"]})
+
+
+@app.post("/api/admin/maintenance")
+async def admin_maintenance(request: Request):
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    on = bool(body.get("on"))
+    msg = str(body.get("message", "The forge is being retuned. Back soon."))[:200]
+    set_setting("maintenance", {"on": on, "message": msg})
+    log_audit(_actor_of(user), "maintenance", "on" if on else "off")
+    return JSONResponse({"ok": True, "maintenance": _maint()})
+
+
+@app.get("/api/admin/config/versions")
+async def admin_cfg_versions(request: Request):
+    await require_admin_request(request)
+    return JSONResponse({"versions": get_setting("config_versions", [])})
+
+
+@app.post("/api/admin/config/save")
+async def admin_cfg_save(request: Request):
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    label = (str(body.get("label", "")).strip()[:40]) or "snapshot"
+    versions = get_setting("config_versions", [])
+    versions = ([{"label": label, "ts": iso(_now()),
+                  "override": get_setting("config_override", {})}] + versions)[:20]
+    set_setting("config_versions", versions)
+    log_audit(_actor_of(user), "config:save", label)
+    return JSONResponse({"ok": True, "versions": versions})
+
+
+@app.post("/api/admin/config/rollback")
+async def admin_cfg_rollback(request: Request):
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    try:
+        idx = int(body.get("index", 0))
+    except (TypeError, ValueError):
+        idx = -1
+    versions = get_setting("config_versions", [])
+    if idx < 0 or idx >= len(versions):
+        raise HTTPException(status_code=400, detail="bad version index")
+    set_setting("config_override", versions[idx].get("override", {}))
+    log_audit(_actor_of(user), "config:rollback", versions[idx].get("label", str(idx)))
+    return JSONResponse({"ok": True, "config": cfg()})
+
+@app.post("/api/admin/ages")
+async def admin_ages(request: Request):
+    """Create / edit / remove an Age (world era). body: {op, age:{...}, id}"""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    op = body.get("op")
+    age_cfg = dict(cfg().get("age", {}))
+    ages = dict(age_cfg.get("ages", {}))
+    if op in ("add", "edit"):
+        a = body.get("age") or {}
+        aid = str(a.get("id", "")).strip()
+        if not aid or not a.get("name"):
+            raise HTTPException(status_code=400, detail="age needs id + name")
+        pal = a.get("palette")
+        if isinstance(pal, str):
+            pal = [c.strip() for c in pal.split(",") if c.strip()]
+        ages[aid] = {
+            "name": str(a.get("name"))[:40],
+            "tagline": str(a.get("tagline", ""))[:120],
+            "decay_multiplier": float(a.get("decay_multiplier", 1.0)),
+            "invade_cost_multiplier": float(a.get("invade_cost_multiplier", 1.0)),
+            "palette": pal or ["#ff5a3c", "#ffb020", "#3ce0c8"],
+        }
+    elif op == "remove":
+        aid = str(body.get("id", ""))
+        if aid == age_cfg.get("current"):
+            raise HTTPException(status_code=400, detail="cannot remove the active age")
+        ages.pop(aid, None)
+    else:
+        raise HTTPException(status_code=400, detail="bad op")
+    over = get_setting("config_override", {})
+    over.setdefault("age", {})
+    over["age"]["ages"] = ages
+    set_setting("config_override", over)
+    log_audit(_actor_of(user), "world:ages:" + str(op), str(body.get("id") or (body.get("age") or {}).get("id")))
+    return JSONResponse({"ok": True, "ages": ages})
+
+
+@app.post("/api/admin/ranks")
+async def admin_ranks(request: Request):
+    """Replace the rank-tier ladder. body: {ranks: [...]}"""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    ranks = body.get("ranks")
+    if not isinstance(ranks, list) or not ranks:
+        raise HTTPException(status_code=400, detail="ranks must be a non-empty list")
+    over = get_setting("config_override", {})
+    over["ranks"] = ranks
+    set_setting("config_override", over)
+    log_audit(_actor_of(user), "world:ranks", str(len(ranks)) + " tiers")
+    return JSONResponse({"ok": True, "ranks": ranks})
+
+
+@app.post("/api/admin/ladder")
+async def admin_ladder(request: Request):
+    """Replace the settlement ladder. body: {ladder: [...]}"""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    lad = body.get("ladder")
+    if not isinstance(lad, list) or not lad:
+        raise HTTPException(status_code=400, detail="ladder must be a non-empty list")
+    over = get_setting("config_override", {})
+    over["settlement_ladder"] = lad
+    set_setting("config_override", over)
+    log_audit(_actor_of(user), "world:ladder", str(len(lad)) + " tiers")
+    return JSONResponse({"ok": True, "settlement_ladder": lad})
+
+
+@app.post("/api/admin/admins")
+async def admin_admins(request: Request):
+    """Manage the elder roster (who can open the Forge via Telegram)."""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    adm = dict(cfg().get("admin", {}))
+    if isinstance(body.get("usernames"), list):
+        adm["usernames"] = [str(u).lstrip("@").strip() for u in body["usernames"] if str(u).strip()]
+    if isinstance(body.get("user_ids"), list):
+        adm["user_ids"] = [str(x).strip() for x in body["user_ids"] if str(x).strip()]
+    over = get_setting("config_override", {})
+    over["admin"] = adm
+    set_setting("config_override", over)
+    log_audit(_actor_of(user), "world:admins", json.dumps(adm)[:200])
+    return JSONResponse({"ok": True, "admin": adm})
+
+
+@app.post("/api/admin/lands")
+async def admin_lands(request: Request):
+    """Operate the Lands map: rename, set owner, reset a contest, clear cooldown, resolve."""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    op = body.get("op")
+    lid = str(body.get("land_id", ""))
+    with db() as conn:
+        ensure_lands(conn)
+        if op == "rename":
+            conn.execute("UPDATE lands SET name = ? WHERE land_id = ?", (str(body.get("name", ""))[:40], lid))
+        elif op == "set_owner":
+            tid = body.get("owner_tribe") or ""
+            if tid and not conn.execute("SELECT 1 FROM tribes WHERE tribe_id = ?", (tid,)).fetchone():
+                raise HTTPException(status_code=404, detail="tribe not found")
+            conn.execute("UPDATE lands SET owner_tribe = ?, staked = ?, attacker_tribe = '', "
+                         "attacker_staked = 0, contest_ends = '' WHERE land_id = ?",
+                         (tid, int(body.get("staked", 0) or 0), lid))
+        elif op == "reset_contest":
+            conn.execute("UPDATE lands SET attacker_tribe = '', attacker_staked = 0, contest_ends = '' WHERE land_id = ?", (lid,))
+        elif op == "clear_cooldown":
+            conn.execute("UPDATE lands SET cooldown_until = '' WHERE land_id = ?", (lid,))
+        elif op == "resolve":
+            resolve_contests(conn)
+        else:
+            raise HTTPException(status_code=400, detail="bad op")
+        lands = lands_state(conn)
+    log_audit(_actor_of(user), "lands:" + str(op), lid)
+    return JSONResponse({"ok": True, "lands": lands})
+
+def compute_allocations(conn) -> list:
+    """Transparent airdrop allocation: personal effort (Kindle + Ember) scaled by a
+    1x-2x tribe multiplier based on the tribe's average Loyalty earned per member.
+    Banned accounts are excluded. Returns rows sorted by points, with % of pool."""
+    users = _rows(conn.execute(
+        "SELECT user_id, name, username, tribe_id, kindle, ember, wallet, banned FROM users").fetchall())
+    tribes = _rows(conn.execute("SELECT tribe_id, loyalty_earned FROM tribes").fetchall())
+    tstats = {}
+    for t in tribes:
+        n = tribe_member_count(conn, t["tribe_id"]) or 1
+        tstats[t["tribe_id"]] = float(t["loyalty_earned"]) / n
+    max_avg = max(tstats.values()) if tstats else 0.0
+    rows = []
+    for u in users:
+        if int(u.get("banned", 0) or 0):
+            continue
+        base = int(u["kindle"]) + int(u["ember"])
+        avg = tstats.get(u.get("tribe_id"), 0.0)
+        mult = 1.0 + (avg / max_avg if max_avg > 0 else 0.0)
+        pts = base * mult
+        rows.append({
+            "user_id": u["user_id"], "name": u["name"], "username": u.get("username", ""),
+            "tribe_id": u.get("tribe_id") or "", "wallet": u.get("wallet", ""),
+            "kindle": int(u["kindle"]), "ember": int(u["ember"]),
+            "tribe_mult": round(mult, 3), "points": round(pts, 2),
+        })
+    total = sum(r["points"] for r in rows) or 1.0
+    for r in rows:
+        r["allocation_pct"] = round(100.0 * r["points"] / total, 6)
+    rows.sort(key=lambda r: -r["points"])
+    return rows
+
+
+@app.get("/api/admin/snapshot")
+async def admin_snapshot(request: Request):
+    """Preview computed allocations without freezing them."""
+    await require_admin_request(request)
+    with db() as conn:
+        rows = compute_allocations(conn)
+    saved = get_setting("last_snapshot", {})
+    return JSONResponse({"preview": rows[:200], "count": len(rows),
+                         "with_wallet": sum(1 for r in rows if r["wallet"]),
+                         "last_snapshot": {"ts": saved.get("ts"), "count": saved.get("count")}})
+
+
+@app.post("/api/admin/snapshot")
+async def admin_snapshot_take(request: Request):
+    """Freeze the current allocation snapshot (persisted, exportable as CSV)."""
+    user = await require_admin_request(request)
+    with db() as conn:
+        rows = compute_allocations(conn)
+    set_setting("last_snapshot", {"ts": iso(_now()), "count": len(rows), "rows": rows})
+    log_audit(_actor_of(user), "snapshot", str(len(rows)) + " kin")
+    return JSONResponse({"ok": True, "ts": iso(_now()), "count": len(rows)})
+
+
+@app.get("/api/admin/snapshot.csv")
+async def admin_snapshot_csv(request: Request):
+    await require_admin_request(request)
+    snap = get_setting("last_snapshot", {})
+    rows = snap.get("rows") or []
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "name", "username", "tribe_id", "wallet",
+                "kindle", "ember", "tribe_mult", "points", "allocation_pct"])
+    for r in rows:
+        w.writerow([r["user_id"], r["name"], r["username"], r["tribe_id"], r["wallet"],
+                    r["kindle"], r["ember"], r["tribe_mult"], r["points"], r["allocation_pct"]])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=tribes_snapshot.csv"})
+
+
+@app.post("/api/admin/season/reset")
+async def admin_season_reset(request: Request):
+    """Archive current standings, then zero all progress for a fresh season."""
+    user = await require_admin_request(request)
+    body = await body_of(request)
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm required")
+    with db() as conn:
+        standings = _rows(conn.execute(
+            "SELECT tribe_id, name, loyalty, loyalty_earned FROM tribes ORDER BY loyalty_earned DESC").fetchall())
+        conn.execute("UPDATE users SET kindle = 0, ember = 0, wards = 0, last_checkin = '', title = ''")
+        conn.execute("UPDATE tribes SET loyalty = 0, loyalty_earned = 0, embertide = 0, chill_days = 0")
+        for tbl in ("checkins", "completions", "relics"):
+            conn.execute(f"DELETE FROM {tbl}")
+        conn.execute("UPDATE lands SET owner_tribe = '', staked = 0, attacker_tribe = '', "
+                     "attacker_staked = 0, contest_ends = '', cooldown_until = ''")
+    archive = get_setting("season_archive", [])
+    archive = ([{"ts": iso(_now()), "standings": standings}] + archive)[:12]
+    set_setting("season_archive", archive)
+    log_audit(_actor_of(user), "season:reset", str(len(standings)) + " tribes archived")
+    return JSONResponse({"ok": True, "archived": len(standings)})
+
 
 # --------------------------------------------------------------------------- #
 # Health, manifest, static frontend                                           #
