@@ -927,7 +927,8 @@ def seed_demo() -> None:
     if not DEV_MODE:
         return
     with db() as conn:
-        if conn.execute("SELECT 1 FROM tribes WHERE tribe_id LIKE 'demo_%' LIMIT 1").fetchone():
+        # Change 'demo_%' to 'demo_%%'
+if conn.execute("SELECT 1 FROM tribes WHERE tribe_id LIKE 'demo_%%' LIMIT 1").fetchone():
             return
         demo = [("demo_wolves", "Ashen Wolves", "wolf", "#ff5a3c", 52000),
                 ("demo_ravens", "Storm Ravens", "raven", "#3ce0c8", 28000),
