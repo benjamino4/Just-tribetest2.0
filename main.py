@@ -917,18 +917,17 @@ def compute_state(uid: str, name: str = "Kin", username: str = "") -> dict:
                 "code": f"ref_{uid}",
             },
             "dev_mode": DEV_MODE,
-            "rekindle_cost": int(cfg().get("rekindle", {}).get("stars_cost", 30)),
-            "tribe_found_cost": int(cfg().get("tribe", {}).get("found_ember_cost", 0)),
-            "tribe_found_min_kindle": int(cfg().get("tribe", {}).get("found_min_kindle", 0)),
-        }
+                    "rekindle_cost": int(cfg().get("rekindle", {}).get("stars_cost", 30)),
+        "tribe_found_cost": int(cfg().get("tribe", {}).get("found_ember_cost", 0)),
+        "tribe_found_min_kindle": int(cfg().get("tribe", {}).get("found_min_kindle", 0)),
+    }
 
 
 def seed_demo() -> None:
     if not DEV_MODE:
         return
     with db() as conn:
-        # Change 'demo_%' to 'demo_%%'
-if conn.execute("SELECT 1 FROM tribes WHERE tribe_id LIKE 'demo_%%' LIMIT 1").fetchone():
+        if conn.execute("SELECT 1 FROM tribes WHERE tribe_id LIKE 'demo_%%' LIMIT 1").fetchone():
             return
         demo = [("demo_wolves", "Ashen Wolves", "wolf", "#ff5a3c", 52000),
                 ("demo_ravens", "Storm Ravens", "raven", "#3ce0c8", 28000),
