@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  telegram-mini-app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${ENV_TELEGRAM_TOKEN}
+      - DATABASE_URL=${services.app-db.connections.pg_bouncer.uri}
+    depends_on:
+      - app-db
+
+  app-db:
+    image: aiven/postgres:16
+    x-aiven-service:
+      plan: startup-4
+      cloud: aws-us-east-1
