@@ -169,8 +169,22 @@ def age_now() -> dict:
 # --------------------------------------------------------------------------- #
 # Schema                                                                      #
 # --------------------------------------------------------------------------- #
+_ALL_TABLES = (
+    "settings", "tribes", "users", "checkins", "completions", "relics",
+    "lands", "rekindles", "referrals", "inventory", "payments",
+)
+
+
 def init_db() -> None:
     with db() as conn:
+        # One-time full reset: set env var RESET_DB=1 in Render, deploy once so
+        # the old drifted schema is wiped and rebuilt, then REMOVE the var.
+        if os.environ.get("RESET_DB", "").strip().lower() in ("1", "true", "yes"):
+            if USE_PG:
+                conn.execute("DROP TABLE IF EXISTS " + ", ".join(_ALL_TABLES) + " CASCADE")
+            else:
+                for t in _ALL_TABLES:
+                    conn.execute("DROP TABLE IF EXISTS " + t)
         conn.execute("""CREATE TABLE IF NOT EXISTS settings (
             k TEXT PRIMARY KEY, v TEXT NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS tribes (
@@ -259,6 +273,28 @@ def init_db() -> None:
                 "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS war_cry     TEXT    DEFAULT ''",
                 "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS chill_days  INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE tribes ADD COLUMN IF NOT EXISTS created_at  TEXT",
+                "ALTER TABLE checkins    ADD COLUMN IF NOT EXISTS day  TEXT",
+                "ALTER TABLE completions ADD COLUMN IF NOT EXISTS task_id TEXT",
+                "ALTER TABLE completions ADD COLUMN IF NOT EXISTS period  TEXT",
+                "ALTER TABLE relics      ADD COLUMN IF NOT EXISTS day  TEXT",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS name           TEXT",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS owner_tribe    TEXT    DEFAULT ''",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS staked         INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS attacker_tribe TEXT    DEFAULT ''",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS attacker_staked INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS contest_ends   TEXT    DEFAULT ''",
+                "ALTER TABLE lands ADD COLUMN IF NOT EXISTS cooldown_until TEXT    DEFAULT ''",
+                "ALTER TABLE rekindles ADD COLUMN IF NOT EXISTS savior_id TEXT",
+                "ALTER TABLE rekindles ADD COLUMN IF NOT EXISTS saved_id  TEXT",
+                "ALTER TABLE rekindles ADD COLUMN IF NOT EXISTS ts        TEXT",
+                "ALTER TABLE referrals ADD COLUMN IF NOT EXISTS joined_tribe TEXT DEFAULT ''",
+                "ALTER TABLE referrals ADD COLUMN IF NOT EXISTS ts           TEXT",
+                "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS qty  INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE inventory ADD COLUMN IF NOT EXISTS meta TEXT    DEFAULT ''",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS item_id TEXT",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS stars   INTEGER",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS ts      TEXT",
             ):
                 try:
                     conn.execute(stmt)
