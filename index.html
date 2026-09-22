@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>Tribes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="styles.css" />
 </head>
@@ -84,6 +87,14 @@
   <symbol id="ic-rank" viewBox="0 0 64 64">
    <path fill="url(#gGold)" d="M32 6l7 14 15 2-11 11 3 15-14-8-14 8 3-15L10 22l15-2z"/>
   </symbol>
+  <symbol id="ic-more" viewBox="0 0 64 64">
+   <circle cx="14" cy="32" r="5" fill="currentColor"/><circle cx="32" cy="32" r="5" fill="currentColor"/><circle cx="50" cy="32" r="5" fill="currentColor"/>
+  </symbol>
+  <symbol id="ic-sky" viewBox="0 0 64 64">
+   <circle cx="22" cy="20" r="9" fill="url(#gGold)"/>
+   <path fill="#e9e6ea" opacity=".9" d="M30 44c0-7 6-12 13-12 1-6 7-10 13-8 5 2 7 8 5 13 3 1 3 7-2 7H35c-3 0-5-3-5-0z"/>
+   <path fill="url(#gGold)" d="M48 8l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/>
+  </symbol>
  </defs>
 </svg>
 
@@ -92,18 +103,27 @@
 <div id="app">
   <header id="topbar">
     <div class="brand"><svg class="logo"><use href="#ic-flame"/></svg><span>TRIBES</span></div>
-    <div id="ageChip" class="age-chip"></div>
+    <div class="topbar-right">
+      <div id="ageChip" class="age-chip"></div>
+      <button id="moreBtn" class="iconbtn" aria-label="More"><svg style="width:20px;height:20px;color:#fff"><use href="#ic-more"/></svg></button>
+    </div>
   </header>
 
   <main id="view"><div class="loader">Kindling the fire…</div></main>
 
   <nav id="tabs">
-    <button data-tab="home" class="active"><svg><use href="#ic-flame"/></svg><span>Fire</span></button>
-    <button data-tab="tribe"><svg><use href="#ic-crest"/></svg><span>Tribe</span></button>
-    <button data-tab="lands"><svg><use href="#ic-land"/></svg><span>Lands</span></button>
-    <button data-tab="store"><svg><use href="#ic-star"/></svg><span>Store</span></button>
-    <button data-tab="bag"><svg><use href="#ic-cache"/></svg><span>Satchel</span></button>
+    <div class="navwrap">
+      <button data-tab="home" class="active"><svg><use href="#ic-flame"/></svg><span>Fire</span></button>
+      <button data-tab="tribe"><svg><use href="#ic-crest"/></svg><span>Tribe</span></button>
+      <button data-tab="ranks"><svg><use href="#ic-rank"/></svg><span>Ranks</span></button>
+      <button data-tab="lands"><svg><use href="#ic-land"/></svg><span>Lands</span></button>
+      <button data-tab="store"><svg><use href="#ic-sky"/></svg><span>Sky</span></button>
+    </div>
   </nav>
+</div>
+
+<div id="overlay" class="overlay">
+  <div id="sheet" class="sheet"><div class="handle"></div><div id="sheetBody"></div></div>
 </div>
 <div id="toast"></div>
 <script src="app.js"></script>
