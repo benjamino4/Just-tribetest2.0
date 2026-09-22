@@ -950,7 +950,7 @@ if conn.execute("SELECT 1 FROM tribes WHERE tribe_id LIKE 'demo_%%' LIMIT 1").fe
 
 
 init_db()
-seed_demo()
+# seed_demo()
 
 # --------------------------------------------------------------------------- #
 # Core API                                                                    #
